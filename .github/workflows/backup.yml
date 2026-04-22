@@ -30,7 +30,7 @@ jobs:
           FILENAME="backup_${TIMESTAMP}.dump"
           echo "FILENAME=${FILENAME}" >> $GITHUB_ENV
 
-          pg_dump \
+          /usr/lib/postgresql/17/bin/pg_dump \
             --format=custom \
             --no-owner \
             --no-acl \
