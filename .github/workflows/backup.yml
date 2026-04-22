@@ -1,0 +1,89 @@
+name: Supabase Hourly Backup
+
+on:
+  schedule:
+    - cron: "5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates gnupg
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          sudo sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
+
+      - name: Dump database
+        env:
+          DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          TIMESTAMP=$(TZ='Asia/Taipei' date +'%Y-%m-%d_%H%M')
+          FILENAME="backup_${TIMESTAMP}.dump"
+          echo "FILENAME=${FILENAME}" >> $GITHUB_ENV
+
+          pg_dump \
+            --format=custom \
+            --no-owner \
+            --no-acl \
+            --no-privileges \
+            --compress=9 \
+            --verbose \
+            --file="${FILENAME}" \
+            "${DB_URL}"
+
+          SIZE=$(du -h "${FILENAME}" | cut -f1)
+          echo "✅ Dumped ${FILENAME} (${SIZE})"
+
+      - name: Upload to B2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          AWS_DEFAULT_REGION: auto
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+          B2_BUCKET: ${{ secrets.B2_BUCKET }}
+        run: |
+          aws s3 cp "${{ env.FILENAME }}" "s3://${B2_BUCKET}/${{ env.FILENAME }}" \
+            --endpoint-url "${B2_ENDPOINT}"
+          echo "✅ Uploaded to s3://${B2_BUCKET}/${{ env.FILENAME }}"
+
+      - name: Cleanup old backups (keep latest 720 = 30 days)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          AWS_DEFAULT_REGION: auto
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+          B2_BUCKET: ${{ secrets.B2_BUCKET }}
+          KEEP: 720
+        run: |
+          aws s3api list-objects-v2 \
+            --bucket "${B2_BUCKET}" \
+            --endpoint-url "${B2_ENDPOINT}" \
+            --prefix "backup_" \
+            --query 'Contents[].Key' \
+            --output text 2>/dev/null \
+            | tr '\t' '\n' \
+            | grep -v '^None$' \
+            | grep -v '^$' \
+            | sort > all_backups.txt || true
+
+          TOTAL=$(wc -l < all_backups.txt | tr -d ' ')
+          echo "Total backups: ${TOTAL}, keeping latest ${KEEP}"
+
+          if [ "$TOTAL" -gt "$KEEP" ]; then
+            DELETE_COUNT=$((TOTAL - KEEP))
+            echo "Deleting oldest ${DELETE_COUNT} backup(s)..."
+            head -n "$DELETE_COUNT" all_backups.txt | while read -r key; do
+              [ -n "$key" ] && aws s3 rm "s3://${B2_BUCKET}/${key}" --endpoint-url "${B2_ENDPOINT}"
+            done
+          else
+            echo "No cleanup needed."
+          fi
