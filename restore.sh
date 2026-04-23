@@ -59,7 +59,7 @@ restore_dump() {
   echo "   檔案：${file}"
   echo "   目標：${TARGET_DB_URL%%@*}@***"
   echo ""
-  read -p "❓ 這會 DROP 目標資料庫現有的 objects，確定繼續？(yes/NO) " confirm
+  read -p "❓ 這會 DROP 目標資料庫 public schema 的現有物件，確定繼續？(yes/NO) " confirm
   if [ "$confirm" != "yes" ]; then
     echo "取消。"
     exit 1
@@ -70,14 +70,42 @@ restore_dump() {
     --no-owner \
     --no-acl \
     --no-privileges \
+    --no-publications \
+    --no-subscriptions \
     --clean \
     --if-exists \
-    --exit-on-error \
     --verbose \
     --dbname "$TARGET_DB_URL" \
-    "$file"
+    "$file" 2> restore.log || true
 
-  echo "✅ 還原完成。"
+  # 過濾出真正重要的訊息
+  echo ""
+  echo "═══════════════════════════════════════════════════════════"
+  echo "📊 還原結果分析"
+  echo "═══════════════════════════════════════════════════════════"
+
+  # 統計各類錯誤
+  TOTAL_ERR=$(grep -c "^pg_restore: 錯誤\|^pg_restore: error" restore.log || echo 0)
+  SYSTEM_ERR=$(grep -cE "schema (auth|storage|realtime|vault|graphql|graphql_public|pgbouncer|cron|extensions)|pgrst_|supabase_|issue_pg_|Non-superuser owned event trigger|already exists" restore.log || echo 0)
+  BUSINESS_ERR=$((TOTAL_ERR - SYSTEM_ERR))
+
+  echo "  系統 schema 噴錯（可忽略）：${SYSTEM_ERR}"
+  echo "  業務 schema 噴錯（需檢查）：${BUSINESS_ERR}"
+  echo ""
+
+  if [ "$BUSINESS_ERR" -gt 0 ]; then
+    echo "⚠️  有 ${BUSINESS_ERR} 筆可能需要關注的錯誤："
+    grep "^pg_restore: 錯誤\|^pg_restore: error" restore.log \
+      | grep -vE "schema (auth|storage|realtime|vault|graphql|graphql_public|pgbouncer|cron|extensions)|pgrst_|supabase_|issue_pg_|Non-superuser owned event trigger|already exists" \
+      | head -20
+    echo ""
+    echo "   完整 log 在 restore.log"
+  else
+    echo "✅ public schema 還原無錯誤，完整 log 在 restore.log"
+  fi
+
+  echo ""
+  echo "👉 下一步：登入 Supabase Dashboard 確認 public 資料表的資料都正常"
 }
 
 case "$CMD" in
