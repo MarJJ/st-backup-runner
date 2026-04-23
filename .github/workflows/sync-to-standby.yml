@@ -1,0 +1,76 @@
+name: Sync to Standby Supabase
+
+on:
+  schedule:
+    - cron: "*/10 * * * *" # 每 10 分鐘
+  workflow_dispatch:
+
+concurrency:
+  group: sync-standby
+  cancel-in-progress: false # 不要同時跑兩份，但後面的要等前面的跑完
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates gnupg
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          sudo sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
+
+      - name: Dump from primary
+        env:
+          PRIMARY_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          /usr/lib/postgresql/17/bin/pg_dump \
+            --format=custom \
+            --no-owner \
+            --no-acl \
+            --no-privileges \
+            --no-publications \
+            --no-subscriptions \
+            --schema=public \
+            --compress=9 \
+            --file="sync.dump" \
+            "${PRIMARY_DB_URL}"
+
+          SIZE=$(du -h sync.dump | cut -f1)
+          echo "✅ Dumped primary public schema (${SIZE})"
+
+      - name: Restore to standby
+        env:
+          STANDBY_DB_URL: ${{ secrets.STANDBY_DB_URL }}
+        run: |
+          /usr/lib/postgresql/17/bin/pg_restore \
+            --no-owner \
+            --no-acl \
+            --no-privileges \
+            --clean \
+            --if-exists \
+            --dbname "${STANDBY_DB_URL}" \
+            sync.dump \
+            2>&1 | tail -50 || true
+
+          echo "✅ Restored to standby"
+
+      - name: Verify standby
+        env:
+          STANDBY_DB_URL: ${{ secrets.STANDBY_DB_URL }}
+        run: |
+          # 簡單 sanity check: 數一下幾個關鍵 table 的筆數
+          psql "${STANDBY_DB_URL}" -c "
+            SELECT
+              (SELECT count(*) FROM users) AS users_count,
+              (SELECT count(*) FROM stock_bets) AS bets_count,
+              (SELECT count(*) FROM categories) AS cats_count,
+              (SELECT count(*) FROM stocks) AS stocks_count,
+              (SELECT max(created_at) FROM stock_bets) AS latest_bet_at;
+          "
