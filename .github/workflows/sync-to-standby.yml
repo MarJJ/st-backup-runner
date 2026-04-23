@@ -45,21 +45,36 @@ jobs:
           SIZE=$(du -h sync.dump | cut -f1)
           echo "✅ Dumped primary public schema (${SIZE})"
 
-      - name: Restore to standby
+      - name: Restore data to standby
         env:
           STANDBY_DB_URL: ${{ secrets.STANDBY_DB_URL }}
         run: |
+          # 先清空 public 的業務資料表
+          # 順序不重要，CASCADE 會處理 FK
+          psql "${STANDBY_DB_URL}" <<'EOF'
+          TRUNCATE TABLE
+            public.stock_bets,
+            public.user_closure,
+            public.user_hierarchy,
+            public.users,
+            public.stocks,
+            public.subcategories,
+            public.categories,
+            public.system_settings
+          RESTART IDENTITY CASCADE;
+          EOF
+
+          # 只還原資料，不動 schema、function、trigger、event trigger
           /usr/lib/postgresql/17/bin/pg_restore \
             --no-owner \
             --no-acl \
             --no-privileges \
-            --clean \
-            --if-exists \
+            --data-only \
+            --disable-triggers \
             --dbname "${STANDBY_DB_URL}" \
-            sync.dump \
-            2>&1 | tail -50 || true
+            sync.dump
 
-          echo "✅ Restored to standby"
+          echo "✅ Data synced to standby"
 
       - name: Verify standby
         env:

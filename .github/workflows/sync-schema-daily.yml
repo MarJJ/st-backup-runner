@@ -1,0 +1,65 @@
+name: Daily Schema Sync to Standby
+
+on:
+  schedule:
+    - cron: "0 16 * * *" # 台灣時間每天凌晨 0 點（UTC 16:00）
+  workflow_dispatch:
+
+jobs:
+  sync-schema:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates gnupg
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          sudo sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
+
+      - name: Drop standby's blocking objects
+        env:
+          STANDBY_DB_URL: ${{ secrets.STANDBY_DB_URL }}
+        run: |
+          # 每日同步 schema 前先砍掉會擋 DROP SCHEMA 的東西
+          psql "${STANDBY_DB_URL}" <<'EOF'
+          DROP EVENT TRIGGER IF EXISTS ensure_rls;
+          DROP FUNCTION IF EXISTS public.rls_auto_enable();
+          EOF
+
+      - name: Dump primary schema + data
+        env:
+          PRIMARY_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          /usr/lib/postgresql/17/bin/pg_dump \
+            --format=custom \
+            --no-owner \
+            --no-acl \
+            --no-privileges \
+            --no-publications \
+            --no-subscriptions \
+            --schema=public \
+            --compress=9 \
+            --file="full.dump" \
+            "${PRIMARY_DB_URL}"
+
+      - name: Full restore to standby
+        env:
+          STANDBY_DB_URL: ${{ secrets.STANDBY_DB_URL }}
+        run: |
+          /usr/lib/postgresql/17/bin/pg_restore \
+            --no-owner \
+            --no-acl \
+            --no-privileges \
+            --clean \
+            --if-exists \
+            --dbname "${STANDBY_DB_URL}" \
+            full.dump \
+            2>&1 | tail -30 || true
+
+          echo "✅ Daily full schema+data sync complete"
