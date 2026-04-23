@@ -2,7 +2,7 @@ name: Sync to Standby Supabase
 
 on:
   schedule:
-    - cron: "*/10 * * * *" # 每 10 分鐘
+    - cron: "7,27,47 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -49,9 +49,10 @@ jobs:
         env:
           STANDBY_DB_URL: ${{ secrets.STANDBY_DB_URL }}
         run: |
-          # 先清空 public 的業務資料表
-          # 順序不重要，CASCADE 會處理 FK
+          # Step 1: 清空資料（replica 模式避開 trigger）
           psql "${STANDBY_DB_URL}" <<'EOF'
+          BEGIN;
+          SET LOCAL session_replication_role = 'replica';
           TRUNCATE TABLE
             public.stock_bets,
             public.user_closure,
@@ -62,17 +63,25 @@ jobs:
             public.categories,
             public.system_settings
           RESTART IDENTITY CASCADE;
+          COMMIT;
           EOF
 
-          # 只還原資料，不動 schema、function、trigger、event trigger
+          # Step 2: 從 dump 抽出純資料 SQL
           /usr/lib/postgresql/17/bin/pg_restore \
+            --data-only \
             --no-owner \
             --no-acl \
             --no-privileges \
-            --data-only \
-            --disable-triggers \
-            --dbname "${STANDBY_DB_URL}" \
+            -f data-only.sql \
             sync.dump
+
+          # Step 3: 灌資料，replica 模式跳過所有 trigger
+          psql "${STANDBY_DB_URL}" <<EOF
+          BEGIN;
+          SET LOCAL session_replication_role = 'replica';
+          \i data-only.sql
+          COMMIT;
+          EOF
 
           echo "✅ Data synced to standby"
 
