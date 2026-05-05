@@ -55,14 +55,14 @@ jobs:
             --endpoint-url "${B2_ENDPOINT}"
           echo "✅ Uploaded to s3://${B2_BUCKET}/${{ env.FILENAME }}"
 
-      - name: Cleanup old backups (keep latest 720 = 30 days)
+      - name: Cleanup old backups (keep latest 1440 = 60 days)
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
           AWS_DEFAULT_REGION: auto
           B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
           B2_BUCKET: ${{ secrets.B2_BUCKET }}
-          KEEP: 720
+          KEEP: 1440
         run: |
           aws s3api list-objects-v2 \
             --bucket "${B2_BUCKET}" \
